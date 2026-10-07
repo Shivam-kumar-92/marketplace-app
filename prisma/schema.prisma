@@ -27,6 +27,9 @@ model User {
   orders        Order[]
   reviews       Review[]
   cart          Cart?
+
+  @@index([role])
+  @@index([createdAt(sort: Desc)])
 }
 
 enum Role {
@@ -47,8 +50,11 @@ model Account {
   scope              String?
   id_token           String?  @db.Text
   session_state      String?
+
   user               User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
   @@unique([provider, providerAccountId])
+  @@index([userId])
 }
 
 model Session {
@@ -56,7 +62,10 @@ model Session {
   sessionToken String   @unique
   userId       String
   expires      DateTime
+
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }
 
 model Address {
@@ -69,8 +78,11 @@ model Address {
   zipCode   String
   country   String
   isDefault Boolean  @default(false)
+
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   orders    Order[]
+
+  @@index([userId])
 }
 
 // ------------------------------------------------------
@@ -92,7 +104,7 @@ model Product {
   slug        String    @unique
   description String    @db.Text
   basePrice   Float
-  images      String[]  // Array of image URLs (Cloudinary/S3)
+  images      String[]  // Array of image URLs (Cloudinary/S3/Unsplash)
   brand       String?
   rating      Float     @default(0.0)
   numReviews  Int       @default(0)
@@ -105,19 +117,31 @@ model Product {
   reviews     Review[]
   orderItems  OrderItem[]
   cartItems   CartItem[]
+
+  // High-performance query indexes for catalog filtering & sorting
+  @@index([categoryId])
+  @@index([categoryId, basePrice])
+  @@index([isFeatured, createdAt(sort: Desc)])
+  @@index([rating(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@index([brand])
 }
 
 model Variant {
   id          String   @id @default(cuid())
   productId   String
   sku         String   @unique
-  name        String   // e.g., "Red, 128GB"
+  name        String   // e.g., "Matte Black, 128GB"
   priceOffset Float    @default(0) // Added to product basePrice
   stock       Int      @default(0)
   
   product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
   orderItems  OrderItem[]
   cartItems   CartItem[]
+
+  // Live inventory lookup indexes
+  @@index([productId])
+  @@index([productId, stock])
 }
 
 // ------------------------------------------------------
@@ -125,7 +149,7 @@ model Variant {
 // ------------------------------------------------------
 model Cart {
   id        String     @id @default(cuid())
-  userId    String?    @unique // Nullable for guest carts (stored in local storage)
+  userId    String?    @unique // Nullable for guest carts
   user      User?      @relation(fields: [userId], references: [id], onDelete: Cascade)
   items     CartItem[]
   updatedAt DateTime   @updatedAt
@@ -141,6 +165,11 @@ model CartItem {
   cart      Cart     @relation(fields: [cartId], references: [id], onDelete: Cascade)
   product   Product  @relation(fields: [productId], references: [id])
   variant   Variant? @relation(fields: [variantId], references: [id])
+
+  // Prevent duplicate cart item rows for the same variant in a cart
+  @@unique([cartId, productId, variantId])
+  @@index([cartId])
+  @@index([productId])
 }
 
 // ------------------------------------------------------
@@ -161,6 +190,11 @@ model Order {
   user             User        @relation(fields: [userId], references: [id])
   shippingAddress  Address     @relation(fields: [addressId], references: [id])
   items            OrderItem[]
+
+  // Real-time order queries & timeline indexes
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
 }
 
 enum OrderStatus {
@@ -185,6 +219,9 @@ model OrderItem {
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product   Product  @relation(fields: [productId], references: [id])
   variant   Variant? @relation(fields: [variantId], references: [id])
+
+  @@index([orderId])
+  @@index([productId])
 }
 
 // ------------------------------------------------------
@@ -200,4 +237,9 @@ model Review {
 
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  // Prevents duplicate review spam and speeds up product review listings
+  @@unique([userId, productId])
+  @@index([productId, createdAt(sort: Desc)])
+  @@index([rating])
 }
