@@ -4,20 +4,43 @@ import { MOCK_CATEGORIES, MOCK_PRODUCTS } from '../src/lib/mockData';
 const prisma = new PrismaClient();
 
 async function main() {
-  console.log('Seeding NexMart database...');
+  console.log('🚀 Seeding NexMart PostgreSQL Database...');
 
-  // 1. Create a demo user for reviews
-  const reviewer = await prisma.user.upsert({
-    where: { email: 'reviewer@marketplace.local' },
+  // 1. Seed Demo Admin & Customer Users
+  const adminUser = await prisma.user.upsert({
+    where: { email: 'admin@nexmart.local' },
     update: {},
     create: {
-      name: 'NexMart Verified Buyer',
-      email: 'reviewer@marketplace.local',
-      role: 'CUSTOMER',
+      name: 'NexMart Operations Admin',
+      email: 'admin@nexmart.local',
+      role: 'ADMIN',
     },
   });
 
-  // 2. Seed Categories
+  const customerUser = await prisma.user.upsert({
+    where: { email: 'buyer@nexmart.local' },
+    update: {},
+    create: {
+      name: 'Aarav Mehta',
+      email: 'buyer@nexmart.local',
+      role: 'CUSTOMER',
+      addresses: {
+        create: {
+          fullName: 'Aarav Mehta',
+          street: '42, Indiranagar 100 Feet Road',
+          city: 'Bengaluru',
+          state: 'Karnataka',
+          zipCode: '560038',
+          country: 'India',
+          isDefault: true,
+        },
+      },
+    },
+  });
+
+  console.log(`✓ Created demo users: Admin (${adminUser.email}), Customer (${customerUser.email})`);
+
+  // 2. Seed All Categories
   for (const cat of MOCK_CATEGORIES) {
     await prisma.category.upsert({
       where: { slug: cat.slug },
@@ -35,8 +58,13 @@ async function main() {
       },
     });
   }
+  console.log(`✓ Seeded ${MOCK_CATEGORIES.length} e-commerce categories.`);
 
-  // 3. Seed Products and Variants
+  // 3. Seed Products, Variants, and Customer Reviews
+  let seededProductsCount = 0;
+  let seededVariantsCount = 0;
+  let seededReviewsCount = 0;
+
   for (const prod of MOCK_PRODUCTS) {
     const existing = await prisma.product.findUnique({
       where: { slug: prod.slug },
@@ -61,7 +89,24 @@ async function main() {
         },
       });
       productId = created.id;
+    } else {
+      await prisma.product.update({
+        where: { id: productId },
+        data: {
+          categoryId: prod.categoryId,
+          title: prod.title,
+          description: prod.description,
+          basePrice: prod.basePrice,
+          images: prod.images,
+          brand: prod.brand,
+          rating: prod.rating,
+          numReviews: prod.numReviews,
+          isFeatured: prod.isFeatured,
+        },
+      });
     }
+
+    seededProductsCount++;
 
     // Seed Variants
     for (const variant of prod.variants) {
@@ -81,33 +126,38 @@ async function main() {
           stock: variant.stock,
         },
       });
+      seededVariantsCount++;
     }
 
     // Seed Reviews
     for (const rev of prod.reviews) {
       const existingReview = await prisma.review.findFirst({
-        where: { productId: productId!, userId: reviewer.id },
+        where: { productId: productId!, userId: customerUser.id },
       });
 
       if (!existingReview) {
         await prisma.review.create({
           data: {
-            userId: reviewer.id,
+            userId: customerUser.id,
             productId: productId!,
             rating: rev.rating,
             comment: rev.comment,
           },
         });
+        seededReviewsCount++;
       }
     }
   }
 
-  console.log('Seeding completed successfully!');
+  console.log(`✓ Seeded ${seededProductsCount} catalog products.`);
+  console.log(`✓ Seeded ${seededVariantsCount} inventory SKU variants.`);
+  console.log(`✓ Seeded ${seededReviewsCount} verified customer reviews.`);
+  console.log('🎉 NexMart database is fully populated and production ready!');
 }
 
 main()
   .catch((e) => {
-    console.error('Seeding error:', e);
+    console.error('❌ Seeding error:', e);
     process.exit(1);
   })
   .finally(async () => {

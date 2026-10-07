@@ -1,10 +1,6 @@
 import React from 'react';
 import Link from 'next/link';
-import { 
-  MOCK_CATEGORIES, 
-  MOCK_PRODUCTS, 
-  MockProduct 
-} from '@/lib/mockData';
+import { getCategories, getProducts } from '@/lib/catalog';
 import ProductCard from '@/components/product/ProductCard';
 import { 
   Sparkles, 
@@ -26,19 +22,13 @@ export default async function Home({ searchParams }: HomePageProps) {
   const currentCategory = params?.cat || 'all';
   const searchQuery = (params?.search || '').toLowerCase().trim();
 
-  // Filter products based on search params
-  const filteredProducts: MockProduct[] = MOCK_PRODUCTS.filter((product) => {
-    const matchesCategory =
-      currentCategory === 'all' || product.categoryId === currentCategory;
-
-    const matchesSearch =
-      !searchQuery ||
-      product.title.toLowerCase().includes(searchQuery) ||
-      product.description.toLowerCase().includes(searchQuery) ||
-      product.brand.toLowerCase().includes(searchQuery);
-
-    return matchesCategory && matchesSearch;
-  });
+  const [categories, filteredProducts] = await Promise.all([
+    getCategories(),
+    getProducts({
+      categoryId: currentCategory,
+      searchQuery: searchQuery,
+    }),
+  ]);
 
   const featuredProducts = filteredProducts.filter((p) => p.isFeatured);
   const remainingProducts = filteredProducts.filter((p) => !p.isFeatured);
@@ -140,7 +130,7 @@ export default async function Home({ searchParams }: HomePageProps) {
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {MOCK_CATEGORIES.map((cat) => {
+            {categories.map((cat) => {
               const isActive = currentCategory === cat.id;
               return (
                 <Link

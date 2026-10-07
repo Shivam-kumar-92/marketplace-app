@@ -1,7 +1,7 @@
 import React from 'react';
 import Link from 'next/link';
-import { notFound } from 'next/navigation';
-import { getProductByIdOrSlug, MOCK_PRODUCTS } from '@/lib/mockData';
+import { MOCK_PRODUCTS } from '@/lib/mockData';
+import { getProductByIdOrSlug } from '@/lib/catalog';
 import ProductDetail from '@/components/product/ProductDetail';
 import { ArrowLeft } from 'lucide-react';
 
@@ -18,7 +18,7 @@ export async function generateStaticParams() {
 
 export default async function ProductPage({ params }: ProductPageProps) {
   const { id } = await params;
-  const product = getProductByIdOrSlug(id);
+  const product = await getProductByIdOrSlug(id);
 
   if (!product) {
     return (
