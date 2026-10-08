@@ -2,6 +2,10 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { stripe } from '@/lib/stripe';
 import { getProductByIdOrSlug } from '@/lib/mockData';
+import { getCurrentUser, resolveCustomerAccount } from '@/lib/auth';
+import { calculateOrderFinancials, roundCurrency } from '@/lib/promotions';
+import { logger, getRequestId } from '@/lib/logger';
+import { checkRateLimit, getClientIp } from '@/lib/rateLimit';
 
 interface CheckoutItemInput {
   productId?: string;
@@ -20,50 +24,57 @@ interface ShippingAddressInput {
   state?: string;
   zipCode?: string;
   country?: string;
+  email?: string;
 }
 
 interface CheckoutRequestBody {
   items: CheckoutItemInput[];
   userId?: string;
+  customerEmail?: string;
+  customerName?: string;
   addressId?: string;
   shippingAddress?: ShippingAddressInput;
+  couponCode?: string;
   idempotencyKey?: string;
 }
 
 async function resolveUserAndAddress(
-  userId?: string,
-  addressId?: string,
-  shippingAddressInput?: ShippingAddressInput
+  req: Request,
+  body: CheckoutRequestBody
 ) {
-  let user = userId ? await prisma.user.findUnique({ where: { id: userId } }) : null;
+  // 1. Resolve authentic user via session/cookies/token or fallback customer account
+  const authUser = await getCurrentUser(req);
+  let user;
+
+  if (authUser) {
+    user = await prisma.user.findUnique({ where: { id: authUser.id } });
+  }
 
   if (!user) {
-    user = await prisma.user.upsert({
-      where: { email: 'guest@marketplace.local' },
-      update: {},
-      create: {
-        name: 'Guest Customer',
-        email: 'guest@marketplace.local',
-        role: 'CUSTOMER',
-      },
+    user = await resolveCustomerAccount({
+      userId: body.userId,
+      email: body.customerEmail || body.shippingAddress?.email,
+      name: body.customerName || body.shippingAddress?.fullName,
     });
   }
 
-  let address = addressId
-    ? await prisma.address.findUnique({ where: { id: addressId } })
+  // 2. Resolve or create delivery address
+  let address = body.addressId
+    ? await prisma.address.findUnique({ where: { id: body.addressId } })
     : null;
 
   if (!address) {
-    if (shippingAddressInput && shippingAddressInput.street) {
+    const s = body.shippingAddress;
+    if (s && s.street) {
       address = await prisma.address.create({
         data: {
           userId: user.id,
-          fullName: shippingAddressInput.fullName || user.name || 'Valued Customer',
-          street: shippingAddressInput.street,
-          city: shippingAddressInput.city || 'Standard City',
-          state: shippingAddressInput.state || 'Standard State',
-          zipCode: shippingAddressInput.zipCode || '00000',
-          country: shippingAddressInput.country || 'IN',
+          fullName: s.fullName || user.name || 'Valued Customer',
+          street: s.street,
+          city: s.city || 'Standard City',
+          state: s.state || 'Standard State',
+          zipCode: s.zipCode || '00000',
+          country: s.country || 'IN',
         },
       });
     } else {
@@ -87,26 +98,58 @@ async function resolveUserAndAddress(
     }
   }
 
-  return { userId: user.id, addressId: address.id };
+  return { user, address };
 }
 
 export async function POST(req: Request) {
+  const requestId = getRequestId(req);
+  const clientIp = getClientIp(req);
+
+  // Rate Limiting (Card-Testing & Fraud Guard): Max 10 checkout attempts per IP per minute
+  const rateLimitResult = checkRateLimit(`checkout_${clientIp}`, {
+    windowMs: 60000,
+    maxRequests: 10,
+  });
+
+  if (!rateLimitResult.allowed) {
+    logger.warn('Rate limit exceeded on checkout endpoint', {
+      endpoint: '/api/checkout',
+      clientIp,
+      requestId,
+    });
+    return NextResponse.json(
+      {
+        success: false,
+        error: `Too many checkout attempts. Please wait ${rateLimitResult.retryAfterSeconds} seconds before trying again.`,
+        code: 'RATE_LIMIT_EXCEEDED',
+        retryAfter: rateLimitResult.retryAfterSeconds,
+      },
+      {
+        status: 429,
+        headers: {
+          'Retry-After': String(rateLimitResult.retryAfterSeconds),
+          'x-request-id': requestId,
+        },
+      }
+    );
+  }
+
   try {
     let body: CheckoutRequestBody;
     try {
       body = await req.json();
     } catch {
       return NextResponse.json(
-        { error: 'Invalid JSON request body' },
+        { success: false, error: 'Invalid JSON request body' },
         { status: 400 }
       );
     }
 
-    const { items, userId, addressId, shippingAddress } = body;
+    const { items } = body;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
       return NextResponse.json(
-        { error: 'Cart is empty or items array is missing' },
+        { success: false, error: 'Cart is empty or items array is missing' },
         { status: 400 }
       );
     }
@@ -136,7 +179,7 @@ export async function POST(req: Request) {
 
       if (!productId || typeof productId !== 'string') {
         return NextResponse.json(
-          { error: `Item at index ${i} is missing a valid productId` },
+          { success: false, error: `Item at index ${i} is missing a valid productId` },
           { status: 400 }
         );
       }
@@ -144,6 +187,7 @@ export async function POST(req: Request) {
       if (!Number.isInteger(quantity) || quantity <= 0) {
         return NextResponse.json(
           {
+            success: false,
             error: `Item at index ${i} (productId: ${productId}) has an invalid quantity: ${quantity}. Quantity must be a positive integer.`,
           },
           { status: 400 }
@@ -182,7 +226,7 @@ export async function POST(req: Request) {
 
       if (!product) {
         return NextResponse.json(
-          { error: `Product not found: ${productId}` },
+          { success: false, error: `Product not found: ${productId}` },
           { status: 404 }
         );
       }
@@ -194,7 +238,7 @@ export async function POST(req: Request) {
         const variant = product.variants.find((v: any) => v.id === variantId);
         if (!variant) {
           return NextResponse.json(
-            { error: `Variant "${variantId}" not found for product "${product.title}"` },
+            { success: false, error: `Variant "${variantId}" not found for product "${product.title}"` },
             { status: 404 }
           );
         }
@@ -203,6 +247,7 @@ export async function POST(req: Request) {
         if (variant.stock < quantity) {
           return NextResponse.json(
             {
+              success: false,
               error: `Insufficient stock for "${product.title} (${variant.name})". Available: ${variant.stock}, Requested: ${quantity}`,
               code: 'OUT_OF_STOCK',
               productId: product.id,
@@ -218,11 +263,12 @@ export async function POST(req: Request) {
         itemName = `${product.title} - ${variant.name}`;
       } else {
         // If product has variants, check total variant inventory
-        if (product.variants.length > 0) {
+        if (product.variants && product.variants.length > 0) {
           const totalStock = product.variants.reduce((sum: number, v: any) => sum + v.stock, 0);
           if (totalStock < quantity) {
             return NextResponse.json(
               {
+                success: false,
                 error: `Insufficient stock for "${product.title}". Total available: ${totalStock}, Requested: ${quantity}`,
                 code: 'OUT_OF_STOCK',
                 productId: product.id,
@@ -235,7 +281,7 @@ export async function POST(req: Request) {
         }
       }
 
-      unitPrice = Math.max(0, unitPrice);
+      unitPrice = roundCurrency(Math.max(0, unitPrice));
 
       verifiedOrderItems.push({
         productId: product.id,
@@ -248,32 +294,39 @@ export async function POST(req: Request) {
     }
 
     // Resolve user and address records ensuring database integrity
-    let resolvedUserId = userId || 'guest_user';
-    let resolvedAddressId = addressId || 'guest_address';
+    const { user, address } = await resolveUserAndAddress(req, body);
 
-    try {
-      const resolved = await resolveUserAndAddress(userId, addressId, shippingAddress);
-      resolvedUserId = resolved.userId;
-      resolvedAddressId = resolved.addressId;
-    } catch (err) {
-      console.warn('[CHECKOUT_ADDRESS_FALLBACK] Using fallback guest identity:', err);
-    }
-
-    // Compute total order amount from verified values
-    const totalAmount = verifiedOrderItems.reduce(
-      (sum, item) => sum + item.price * item.quantity,
-      0
+    // Compute verified items subtotal
+    const subtotal = roundCurrency(
+      verifiedOrderItems.reduce((sum, item) => sum + item.price * item.quantity, 0)
     );
 
-    // Create Order with PENDING status
-    let orderId = `ord_${Math.random().toString(36).substring(2, 10)}`;
+    // Server-Side Financials & Promotion Validation (Area B Fix)
+    const financials = calculateOrderFinancials(subtotal, body.couponCode);
+
+    if (financials.error && body.couponCode) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: financials.error,
+          code: 'INVALID_COUPON',
+        },
+        { status: 400 }
+      );
+    }
+
+    // FAIL-CLOSED Order Persistence (Area A Fix)
+    // We strictly refuse to initiate payment if the database cannot record the order.
+    let order;
     try {
-      const order = await prisma.order.create({
+      order = await prisma.order.create({
         data: {
-          userId: resolvedUserId,
-          addressId: resolvedAddressId,
+          userId: user.id,
+          addressId: address.id,
           status: 'PENDING',
-          totalAmount,
+          totalAmount: financials.totalAmount,
+          shippingAmount: financials.shippingAmount,
+          taxAmount: 0,
           items: {
             create: verifiedOrderItems.map((item) => ({
               productId: item.productId,
@@ -284,13 +337,21 @@ export async function POST(req: Request) {
           },
         },
       });
-      orderId = order.id;
-    } catch (orderErr) {
-      console.warn('[CHECKOUT_ORDER_SIMULATED] Could not save order to DB, proceeding with simulated orderId:', orderId, orderErr);
+    } catch (orderErr: any) {
+      console.error('[CHECKOUT_ORDER_PERSIST_ERROR] Order insertion failed:', orderErr);
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Order could not be saved to database. Checkout session aborted to protect payment integrity.',
+          code: 'ORDER_PERSIST_FAILED',
+          message: orderErr?.message || 'Database write failed',
+        },
+        { status: 500 }
+      );
     }
 
     // Build Stripe line items using verified prices
-    const line_items = verifiedOrderItems.map((item) => ({
+    const line_items: any[] = verifiedOrderItems.map((item) => ({
       price_data: {
         currency: 'inr',
         product_data: {
@@ -306,43 +367,110 @@ export async function POST(req: Request) {
       quantity: item.quantity,
     }));
 
+    // Add Shipping Fee Line Item if applicable
+    if (financials.shippingAmount > 0) {
+      line_items.push({
+        price_data: {
+          currency: 'inr',
+          product_data: {
+            name: 'Standard Delivery Shipping Fee',
+          },
+          unit_amount: Math.round(financials.shippingAmount * 100),
+        },
+        quantity: 1,
+      });
+    }
+
+    // Apply Coupon Discount via dynamic Stripe Coupon
+    let discounts: any[] | undefined = undefined;
+    if (financials.discountAmount > 0) {
+      try {
+        const stripeCoupon = await stripe.coupons.create({
+          amount_off: Math.round(financials.discountAmount * 100),
+          currency: 'inr',
+          duration: 'once',
+          name: financials.appliedCoupon?.code || 'Promotional Discount',
+        });
+        discounts = [{ coupon: stripeCoupon.id }];
+      } catch (couponErr) {
+        console.warn('[STRIPE_COUPON_WARN] Failed to create Stripe discount coupon:', couponErr);
+      }
+    }
+
     const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
 
-    // Create Stripe Checkout Session with metadata and idempotency
-    const session = await stripe.checkout.sessions.create(
-      {
-        payment_method_types: ['card'],
-        line_items,
-        mode: 'payment',
-        success_url: `${appUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}&order_id=${orderId}`,
-        cancel_url: `${appUrl}/cart?canceled_order_id=${orderId}`,
-        metadata: {
-          orderId,
-          userId: resolvedUserId,
+    // Create Stripe Checkout Session with verified metadata and idempotency
+    // DCI-003: Enforce compensating rollback if Stripe API rejects session creation
+    let session;
+    try {
+      session = await stripe.checkout.sessions.create(
+        {
+          payment_method_types: ['card'],
+          line_items,
+          discounts,
+          mode: 'payment',
+          success_url: `${appUrl}/checkout/success?session_id={CHECKOUT_SESSION_ID}&order_id=${order.id}`,
+          cancel_url: `${appUrl}/cart?canceled_order_id=${order.id}`,
+          metadata: {
+            orderId: order.id,
+            userId: user.id,
+            couponCode: body.couponCode || '',
+            requestId,
+          },
         },
-      },
-      idempotencyKey ? { idempotencyKey } : undefined
-    );
+        idempotencyKey ? { idempotencyKey } : undefined
+      );
+    } catch (stripeErr: any) {
+      console.error('[CHECKOUT_STRIPE_ERROR] Stripe session creation failed. Executing compensation rollback on order:', stripeErr);
+      try {
+        await prisma.order.delete({ where: { id: order.id } });
+      } catch (rollbackErr) {
+        console.warn('[ORDER_ROLLBACK_WARN] Could not delete order during rollback, marking CANCELLED:', rollbackErr);
+        await prisma.order.update({
+          where: { id: order.id },
+          data: { status: 'CANCELLED' },
+        });
+      }
 
-    // Record Stripe session ID on the order if DB is active
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Payment provider session could not be established. Order rolled back.',
+          code: 'PAYMENT_SESSION_FAILED',
+          message: stripeErr?.message || 'Stripe API error',
+        },
+        { status: 502 }
+      );
+    }
+
+    // Atomically link Stripe session ID to the order
     try {
       await prisma.order.update({
-        where: { id: orderId },
+        where: { id: order.id },
         data: { stripeSessionId: session.id },
       });
-    } catch {
-      // Ignored if order was simulated
+    } catch (updateErr) {
+      console.warn('[CHECKOUT_ORDER_SESSION_UPDATE_WARN]', updateErr);
     }
 
     return NextResponse.json({
+      success: true,
       url: session.url,
-      orderId,
+      orderId: order.id,
       sessionId: session.id,
+      financials: {
+        subtotal: financials.subtotal,
+        discountAmount: financials.discountAmount,
+        shippingAmount: financials.shippingAmount,
+        totalAmount: financials.totalAmount,
+        appliedCoupon: financials.appliedCoupon?.code || null,
+      },
     });
   } catch (error: any) {
     console.error('[CHECKOUT_ERROR]', error);
     return NextResponse.json(
       {
+        success: false,
         error: 'Internal checkout error',
         message: error?.message || 'Unknown error occurred',
       },

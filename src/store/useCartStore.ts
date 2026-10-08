@@ -32,6 +32,8 @@ interface CartState {
   clearCart: () => void;
   getTotalItems: () => number;
   getTotalPrice: () => number;
+  syncWithServer: () => Promise<void>;
+  loadServerCart: () => Promise<void>;
 }
 
 export const useCartStore = create<CartState>()(
@@ -94,6 +96,52 @@ export const useCartStore = create<CartState>()(
           (total, item) => total + item.price * item.quantity,
           0
         );
+      },
+
+      syncWithServer: async () => {
+        try {
+          const currentItems = get().items;
+          await fetch('/api/cart', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              items: currentItems.map((i) => ({
+                productId: i.productId,
+                variantId: i.variantId,
+                quantity: i.quantity,
+              })),
+            }),
+          });
+        } catch (err) {
+          console.warn('[CART_SYNC_WARN] Failed to sync cart with server:', err);
+        }
+      },
+
+      loadServerCart: async () => {
+        try {
+          const res = await fetch('/api/cart');
+          const data = await res.json();
+          if (res.ok && data.success && Array.isArray(data.items) && data.items.length > 0) {
+            set({
+              items: data.items.map((i: any) => ({
+                id: i.variantId ? `${i.productId}-${i.variantId}` : i.productId,
+                productId: i.productId,
+                variantId: i.variantId || undefined,
+                variantName: i.variantName || undefined,
+                product: {
+                  id: i.productId,
+                  title: i.title,
+                  basePrice: i.price,
+                  images: i.images || [],
+                },
+                quantity: i.quantity,
+                price: i.price,
+              })),
+            });
+          }
+        } catch (err) {
+          console.warn('[CART_LOAD_WARN] Failed to load server cart:', err);
+        }
       },
     }),
     {

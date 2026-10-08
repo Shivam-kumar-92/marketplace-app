@@ -68,20 +68,34 @@ export async function POST(req: Request) {
           return NextResponse.json({ received: true, status: 'already_processed' });
         }
 
-        // Atomically update order status and decrement inventory stock
+        // Atomically update order status and decrement inventory stock inside transaction
+        let wasAlreadyProcessed = false;
+        let hasOutOfStockItems = false;
+
         await prisma.$transaction(async (tx) => {
-          await tx.order.update({
-            where: { id: order.id },
+          // Atomic State Transition Guard (DCI-001):
+          // Only transition orders currently in PENDING status.
+          // This eliminates TOCTOU double-decrement if duplicate webhooks arrive simultaneously.
+          const orderTransition = await tx.order.updateMany({
+            where: {
+              id: order.id,
+              status: 'PENDING',
+            },
             data: {
               status: 'PAID',
               stripeSessionId: session.id,
             },
           });
 
+          if (orderTransition.count === 0) {
+            wasAlreadyProcessed = true;
+            return;
+          }
+
           for (const item of order.items) {
             if (item.variantId) {
               // Concurrency Guard: Atomically decrement only if stock is >= requested quantity
-              const updateResult = await tx.variant.updateMany({
+              const variantUpdateResult = await tx.variant.updateMany({
                 where: {
                   id: item.variantId,
                   stock: { gte: item.quantity },
@@ -93,7 +107,8 @@ export async function POST(req: Request) {
                 },
               });
 
-              if (updateResult.count === 0) {
+              if (variantUpdateResult.count === 0) {
+                hasOutOfStockItems = true;
                 console.warn(
                   `[INVENTORY_RACE_GUARD] Variant ${item.variantId} was low on stock for quantity ${item.quantity}. Setting stock to 0 to prevent negative inventory.`
                 );
@@ -102,12 +117,50 @@ export async function POST(req: Request) {
                   data: { stock: 0 },
                 });
               }
+            } else {
+              // Fallback: If no variant specified, decrement product's primary variant if one exists
+              const primaryVariant = await tx.variant.findFirst({
+                where: { productId: item.productId },
+              });
+              if (primaryVariant) {
+                const primaryUpdateResult = await tx.variant.updateMany({
+                  where: {
+                    id: primaryVariant.id,
+                    stock: { gte: item.quantity },
+                  },
+                  data: {
+                    stock: {
+                      decrement: item.quantity,
+                    },
+                  },
+                });
+
+                if (primaryUpdateResult.count === 0) {
+                  hasOutOfStockItems = true;
+                }
+              }
             }
+          }
+
+          // DCI-002: If stock depleted before settlement, mark status as PROCESSING for merchant review/refund
+          if (hasOutOfStockItems) {
+            console.error(
+              `[OVERSOLD_ALERT] Order ${order.id} paid successfully but encountered depleted inventory. Flagged for fulfillment review.`
+            );
+            await tx.order.update({
+              where: { id: order.id },
+              data: { status: 'PROCESSING' },
+            });
           }
         });
 
+        if (wasAlreadyProcessed) {
+          console.log(`[STRIPE_WEBHOOK] Order ${order.id} was already processed concurrently. Skipping duplicate stock decrement.`);
+          return NextResponse.json({ received: true, status: 'already_processed' });
+        }
+
         console.log(
-          `[STRIPE_WEBHOOK] Successfully marked Order ${order.id} as PAID and decremented inventory stock`
+          `[STRIPE_WEBHOOK] Successfully marked Order ${order.id} as ${hasOutOfStockItems ? 'PROCESSING (Oversold Review)' : 'PAID'} and decremented inventory stock`
         );
         break;
       }

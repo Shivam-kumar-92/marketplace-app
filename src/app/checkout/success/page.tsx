@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, Suspense } from 'react';
+import React, { useEffect, useState, Suspense } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { 
@@ -9,22 +9,81 @@ import {
   Truck, 
   ArrowRight, 
   ShieldCheck, 
-  Calendar,
-  CreditCard,
-  ShoppingBag
+  Calendar, 
+  CreditCard, 
+  ShoppingBag,
+  Clock,
+  AlertCircle
 } from 'lucide-react';
 import { useCartStore } from '@/store/useCartStore';
 
+interface OrderDetails {
+  id: string;
+  status: 'PENDING' | 'PAID' | 'PROCESSING' | 'SHIPPED' | 'OUT_FOR_DELIVERY' | 'DELIVERED' | 'CANCELLED';
+  totalAmount: number;
+  shippingAmount: number;
+  customer?: {
+    name?: string;
+    email?: string;
+  };
+  shippingAddress?: {
+    street?: string;
+    city?: string;
+    state?: string;
+    zipCode?: string;
+    country?: string;
+  };
+  items?: Array<{
+    id: string;
+    productTitle: string;
+    variantName?: string | null;
+    price: number;
+    quantity: number;
+    subtotal: number;
+  }>;
+}
+
 function SuccessContent() {
   const searchParams = useSearchParams();
-  const sessionId = searchParams.get('session_id') || 'cs_test_sample';
-  const orderId = searchParams.get('order_id') || 'ord_' + Math.random().toString(36).substring(2, 9);
+  const sessionId = searchParams.get('session_id') || '';
+  const orderId = searchParams.get('order_id') || '';
   const clearCart = useCartStore((state) => state.clearCart);
 
+  const [order, setOrder] = useState<OrderDetails | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
   useEffect(() => {
-    // Automatically clear customer's cart upon confirmed order completion
+    // Automatically clear customer's cart upon arrival at checkout success
     clearCart();
-  }, [clearCart]);
+
+    if (!orderId) {
+      setLoading(false);
+      return;
+    }
+
+    // Verify order status directly from server API
+    async function verifyOrder() {
+      try {
+        const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+        const res = await fetch(`/api/orders/${orderId}${query}`);
+        const data = await res.json();
+
+        if (res.ok && data.success && data.order) {
+          setOrder(data.order);
+        } else {
+          setError(data.error || 'Could not verify order status with the server.');
+        }
+      } catch (err: any) {
+        console.warn('[ORDER_VERIFY_WARN]', err);
+        setError('Network error while checking order status.');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    verifyOrder();
+  }, [orderId, clearCart]);
 
   const deliveryDate = new Date();
   deliveryDate.setDate(deliveryDate.getDate() + 3);
@@ -46,13 +105,13 @@ function SuccessContent() {
 
       <div className="space-y-3">
         <span className="text-xs font-black uppercase tracking-widest text-emerald-600 bg-emerald-50 px-3 py-1 rounded-full border border-emerald-200">
-          Payment Confirmed via Stripe
+          {order?.status === 'PAID' ? 'Payment Verified & Settled' : 'Payment Received via Stripe'}
         </span>
         <h1 className="text-3xl sm:text-4xl font-black text-gray-900 tracking-tight">
           Thank you for your order!
         </h1>
         <p className="text-gray-500 text-sm max-w-md mx-auto leading-relaxed">
-          We&apos;ve received your payment and our fulfillment team has started preparing your order for express dispatch.
+          We&apos;ve received your order and our fulfillment team has started preparing your parcel for express dispatch.
         </p>
       </div>
 
@@ -62,16 +121,36 @@ function SuccessContent() {
           <div>
             <span className="text-xs text-gray-400 font-medium">Order Reference</span>
             <div className="font-mono text-xs sm:text-sm font-bold text-gray-900 truncate max-w-xs">
-              {orderId}
+              {orderId || 'Order Pending'}
             </div>
           </div>
-          <div className="sm:text-right">
-            <span className="text-xs text-gray-400 font-medium">Stripe Session ID</span>
-            <div className="font-mono text-[11px] text-gray-600 truncate max-w-xs">
-              {sessionId}
+          {sessionId && (
+            <div className="sm:text-right">
+              <span className="text-xs text-gray-400 font-medium">Stripe Session ID</span>
+              <div className="font-mono text-[11px] text-gray-600 truncate max-w-xs">
+                {sessionId}
+              </div>
             </div>
-          </div>
+          )}
         </div>
+
+        {/* Server-Verified Status */}
+        {order && (
+          <div className="bg-gray-50/70 p-4 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs border border-gray-100">
+            <div>
+              <span className="text-gray-500 block">Customer</span>
+              <span className="font-bold text-gray-900">
+                {order.customer?.name} ({order.customer?.email})
+              </span>
+            </div>
+            <div className="sm:text-right">
+              <span className="text-gray-500 block">Verified Total Paid</span>
+              <span className="font-black text-base text-gray-900">
+                ₹{order.totalAmount.toLocaleString('en-IN')}
+              </span>
+            </div>
+          </div>
+        )}
 
         {/* Fulfillment Timeline Tracker */}
         <div className="space-y-4">
@@ -84,7 +163,9 @@ function SuccessContent() {
               <PackageCheck size={20} className="text-emerald-600 flex-shrink-0" />
               <div>
                 <span className="font-bold text-emerald-950 block">Payment Settled</span>
-                <span className="text-[11px] text-emerald-700">Webhook verified</span>
+                <span className="text-[11px] text-emerald-700">
+                  {order?.status === 'PAID' ? 'Webhook confirmed' : 'Stripe authorization verified'}
+                </span>
               </div>
             </div>
 

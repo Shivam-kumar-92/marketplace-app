@@ -81,20 +81,29 @@ export default function CartPage() {
         quantity: item.quantity,
       }));
 
+      // Generate idempotency key for network safety
+      const clientKey = `idemp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
       const res = await fetch('/api/checkout', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'idempotency-key': clientKey,
         },
         body: JSON.stringify({
           items: checkoutItems,
-          userId: 'guest',
+          couponCode: couponMessage?.type === 'success' ? couponCode.trim().toUpperCase() : undefined,
         }),
       });
 
       const data = await res.json();
 
       if (!res.ok) {
+        if (data?.code === 'OUT_OF_STOCK' && data?.availableStock !== undefined) {
+          throw new Error(
+            `${data.error} (Only ${data.availableStock} remaining). Please reduce your quantity.`
+          );
+        }
         throw new Error(data?.error || data?.message || 'Checkout failed. Please try again.');
       }
 
