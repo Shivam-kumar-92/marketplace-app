@@ -1,3 +1,15 @@
+# AI Agent Directives & Universal Project Brain
+
+All AI agents working on this project must inspect and adhere to the project governance files before performing work:
+
+- **AI Directives & Rules:** [`ai/instructions.md`](./ai/instructions.md)
+- **Architectural Decision Record:** [`ai/decisions.md`](./ai/decisions.md)
+- **Known Issues & Technical Debt:** [`ai/known-issues.md`](./ai/known-issues.md)
+- **Current System State:** [`ai/current-state.md`](./ai/current-state.md)
+- **API Reference & Contracts:** [`api/endpoints.md`](./api/endpoints.md), [`api/contracts.md`](./api/contracts.md), [`api/errors.md`](./api/errors.md)
+
+---
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 # This is NOT the Next.js you know
