@@ -1,10 +1,22 @@
+import { unstable_cache } from 'next/cache';
 import { getPrismaClient } from './prisma';
 import { MOCK_CATEGORIES, MOCK_PRODUCTS, MockCategory, MockProduct } from './mockData';
+
+export type ProductSortOption = 'newest' | 'price_asc' | 'price_desc' | 'rating';
+
+export interface ProductQueryOptions {
+  categoryId?: string;
+  searchQuery?: string;
+  isFeatured?: boolean;
+  sortBy?: ProductSortOption;
+  limit?: number;
+  offset?: number;
+}
 
 /**
  * Enterprise Catalog Data Access Layer
  * Seamlessly queries live PostgreSQL via Prisma ORM when available,
- * with fallback to mock data when database connection is not yet configured.
+ * utilizing composite database indexes and falling back to memory catalog.
  */
 
 export async function getCategories(): Promise<MockCategory[]> {
@@ -34,17 +46,23 @@ export async function getCategories(): Promise<MockCategory[]> {
       }));
     }
   } catch (_err) {
-    // Graceful fallback to mock data if database is not reachable
+    // Fallback to mock data if database is not reachable
   }
 
   return MOCK_CATEGORIES;
 }
 
-export async function getProducts(options?: {
-  categoryId?: string;
-  searchQuery?: string;
-  isFeatured?: boolean;
-}): Promise<MockProduct[]> {
+/**
+ * Cached Categories Layer (revalidates every 300 seconds)
+ * Drastically reduces PostgreSQL connection load for repeated navigation requests.
+ */
+export const getCachedCategories = unstable_cache(
+  async () => getCategories(),
+  ['catalog-categories'],
+  { revalidate: 300, tags: ['categories'] }
+);
+
+export async function getProducts(options?: ProductQueryOptions): Promise<MockProduct[]> {
   const prisma = getPrismaClient();
   if (!prisma) {
     return filterMockProducts(options);
@@ -69,6 +87,19 @@ export async function getProducts(options?: {
       ];
     }
 
+    // Determine query ordering mapping to indexed columns
+    let orderByClause: Record<string, 'asc' | 'desc'> = { createdAt: 'desc' };
+    if (options?.sortBy === 'price_asc') {
+      orderByClause = { basePrice: 'asc' };
+    } else if (options?.sortBy === 'price_desc') {
+      orderByClause = { basePrice: 'desc' };
+    } else if (options?.sortBy === 'rating') {
+      orderByClause = { rating: 'desc' };
+    }
+
+    const takeLimit = options?.limit ?? 40;
+    const skipOffset = options?.offset ?? 0;
+
     const dbProducts = await prisma.product.findMany({
       where: whereClause,
       include: {
@@ -80,7 +111,9 @@ export async function getProducts(options?: {
           },
         },
       },
-      orderBy: { createdAt: 'desc' },
+      orderBy: orderByClause,
+      take: takeLimit,
+      skip: skipOffset,
     });
 
     if (dbProducts && dbProducts.length > 0) {
@@ -121,12 +154,8 @@ export async function getProducts(options?: {
   return filterMockProducts(options);
 }
 
-function filterMockProducts(options?: {
-  categoryId?: string;
-  searchQuery?: string;
-  isFeatured?: boolean;
-}): MockProduct[] {
-  return MOCK_PRODUCTS.filter((p) => {
+function filterMockProducts(options?: ProductQueryOptions): MockProduct[] {
+  let list = MOCK_PRODUCTS.filter((p) => {
     if (options?.categoryId && options.categoryId !== 'all') {
       if (p.categoryId !== options.categoryId) return false;
     }
@@ -143,6 +172,22 @@ function filterMockProducts(options?: {
     }
     return true;
   });
+
+  if (options?.sortBy === 'price_asc') {
+    list = [...list].sort((a, b) => a.basePrice - b.basePrice);
+  } else if (options?.sortBy === 'price_desc') {
+    list = [...list].sort((a, b) => b.basePrice - a.basePrice);
+  } else if (options?.sortBy === 'rating') {
+    list = [...list].sort((a, b) => b.rating - a.rating);
+  }
+
+  if (options?.offset || options?.limit) {
+    const start = options.offset || 0;
+    const end = start + (options.limit || 40);
+    list = list.slice(start, end);
+  }
+
+  return list;
 }
 
 export async function getProductByIdOrSlug(idOrSlug: string): Promise<MockProduct | undefined> {

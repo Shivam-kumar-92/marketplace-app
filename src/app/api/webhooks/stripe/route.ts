@@ -80,14 +80,28 @@ export async function POST(req: Request) {
 
           for (const item of order.items) {
             if (item.variantId) {
-              await tx.variant.update({
-                where: { id: item.variantId },
+              // Concurrency Guard: Atomically decrement only if stock is >= requested quantity
+              const updateResult = await tx.variant.updateMany({
+                where: {
+                  id: item.variantId,
+                  stock: { gte: item.quantity },
+                },
                 data: {
                   stock: {
                     decrement: item.quantity,
                   },
                 },
               });
+
+              if (updateResult.count === 0) {
+                console.warn(
+                  `[INVENTORY_RACE_GUARD] Variant ${item.variantId} was low on stock for quantity ${item.quantity}. Setting stock to 0 to prevent negative inventory.`
+                );
+                await tx.variant.update({
+                  where: { id: item.variantId },
+                  data: { stock: 0 },
+                });
+              }
             }
           }
         });
