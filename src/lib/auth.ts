@@ -64,8 +64,9 @@ export async function getCurrentUser(req: Request): Promise<AuthUser | null> {
 export async function requireAdmin(req: Request): Promise<{ isAdmin: boolean; error?: string }> {
   // Check for admin master key header (useful for CI/CD, webhooks, or admin integrations)
   const adminSecretHeader = req.headers.get('x-admin-key');
-  const configuredAdminSecret = process.env.ADMIN_SECRET_KEY || 'marketplace_admin_secret_dev';
-  if (adminSecretHeader && adminSecretHeader === configuredAdminSecret) {
+  const isProduction = process.env.NODE_ENV === 'production';
+  const configuredAdminSecret = process.env.ADMIN_SECRET_KEY || (isProduction ? undefined : 'marketplace_admin_secret_dev');
+  if (configuredAdminSecret && adminSecretHeader && adminSecretHeader === configuredAdminSecret) {
     return { isAdmin: true };
   }
 

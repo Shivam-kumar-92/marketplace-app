@@ -34,6 +34,17 @@ NexMart is a full-stack e-commerce marketplace built for high-performance retail
 
 ```text
 marketplace-app/
+├── .github/                       # GitHub Actions workflows
+│   └── workflows/ci.yml           # Continuous integration test, lint, and build pipeline
+├── deployment/                    # Deployment operations documentation
+│   ├── build.md                   # Build prerequisites and generated artifacts
+│   ├── deployment.md              # Architecture, procedures, and health checks
+│   ├── environments.md            # Topology, variables, and runtime differences
+│   ├── release-checklist.md       # Pre-release verification checklist
+│   └── rollback.md                # Rollback procedures and recovery policies
+├── Dockerfile                     # Multi-stage production container image
+├── docker-compose.yml             # Local and self-hosted orchestration with PostgreSQL
+├── .dockerignore                  # Container build context exclusions
 ├── api/                           # API documentation directory
 │   ├── contracts.md               # Client-server data contracts & audit log
 │   ├── endpoints.md               # Detailed reference for all 10 API routes
@@ -43,6 +54,9 @@ marketplace-app/
 │   ├── rejected-options.md        # Evaluated and rejected alternatives
 │   └── technology.md              # Technology stack evaluations
 ├── prisma/                        # Database schema & migrations
+│   ├── migrations/                # Versioned SQL migrations
+│   │   ├── 20261008000000_init/   # Baseline PostgreSQL migration
+│   │   └── migration_lock.toml    # Prisma migration engine lock
 │   ├── schema.prisma              # Relational models & database indexes
 │   └── seed.ts                    # Enterprise seed script for demo catalog
 ├── public/                        # Static assets (favicons, SVGs)

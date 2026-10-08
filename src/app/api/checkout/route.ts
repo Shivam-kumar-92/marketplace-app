@@ -397,7 +397,9 @@ export async function POST(req: Request) {
       }
     }
 
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+    const requestOrigin = req.headers.get('origin') || 
+      (req.headers.get('host') ? `${req.headers.get('x-forwarded-proto') || 'https'}://${req.headers.get('host')}` : null);
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || requestOrigin || 'http://localhost:3000';
 
     // Create Stripe Checkout Session with verified metadata and idempotency
     // DCI-003: Enforce compensating rollback if Stripe API rejects session creation
